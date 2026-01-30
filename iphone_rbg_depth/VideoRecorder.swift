@@ -73,6 +73,8 @@ class VideoRecorder {
 
         rgbInput = AVAssetWriterInput(mediaType: .video, outputSettings: rgbSettings)
         rgbInput?.expectsMediaDataInRealTime = true
+        // Apply 90-degree rotation for portrait orientation
+        rgbInput?.transform = CGAffineTransform(rotationAngle: .pi / 2)
 
         rgbAdaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: rgbInput!,
@@ -100,6 +102,8 @@ class VideoRecorder {
 
         depthInput = AVAssetWriterInput(mediaType: .video, outputSettings: depthSettings)
         depthInput?.expectsMediaDataInRealTime = true
+        // Apply 90-degree rotation for portrait orientation
+        depthInput?.transform = CGAffineTransform(rotationAngle: .pi / 2)
 
         depthAdaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: depthInput!,

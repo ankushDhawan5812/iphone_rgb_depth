@@ -89,7 +89,8 @@ class DepthImageConverter {
             return nil
         }
 
-        return UIImage(cgImage: cgImage)
+        // Rotate 90 degrees for portrait orientation
+        return UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
     }
 
     /// Converts RGB CVPixelBuffer to UIImage
@@ -103,6 +104,7 @@ class DepthImageConverter {
             return nil
         }
 
-        return UIImage(cgImage: cgImage)
+        // Rotate 90 degrees for portrait orientation
+        return UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
     }
 }
