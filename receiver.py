@@ -57,6 +57,7 @@ class FrameReceiver:
         print(f"📱 Waiting for iPhone connection...")
 
         self.client_socket, addr = self.server_socket.accept()
+        self.client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         print(f"✅ Connected to {addr}")
 
         self.start_time = datetime.now()
@@ -155,13 +156,13 @@ class FrameReceiver:
 
     def _recv_exact(self, size):
         """Receive exact number of bytes"""
-        data = b''
+        data = bytearray()
         while len(data) < size:
             chunk = self.client_socket.recv(size - len(data))
             if not chunk:
                 return None
-            data += chunk
-        return data
+            data.extend(chunk)
+        return bytes(data)
 
     def process_frame(self, frame):
         """Process received frame"""
@@ -211,20 +212,14 @@ class FrameReceiver:
             self.frames_received['rgb'] += 1
             self.bytes_received['rgb'] += frame['data_size']
 
-            if frame['is_key'] and self.rgb_encoding == 'h264':
-                print(f"🔑 Keyframe #{frame['frame_num']}: {frame['data_size'] / 1024:.1f} KB")
-
         elif frame_type == FRAME_TYPE_DEPTH:
-            # Decode PNG depth
+            # Decode image-compressed depth (PNG/JPEG).
             depth_array = np.frombuffer(frame['data'], dtype=np.uint8)
             depth_image = cv2.imdecode(depth_array, cv2.IMREAD_UNCHANGED)
 
             if depth_image is not None:
                 with self.depth_lock:
                     self.latest_depth_frame = depth_image
-                print(f"📊 Depth frame #{frame['frame_num']}: {depth_image.shape}, {frame['data_size'] / 1024:.1f} KB")
-            else:
-                print(f"❌ Failed to decode depth frame #{frame['frame_num']}")
 
             self.frames_received['depth'] += 1
             self.bytes_received['depth'] += frame['data_size']
@@ -301,6 +296,8 @@ def main():
         print("Press 'q' to quit\n")
 
         frame_count = 0
+        display_stride = 2
+        last_stats_print = datetime.now()
 
         while True:
             # Receive frame
@@ -313,8 +310,8 @@ def main():
             receiver.process_frame(frame)
             frame_count += 1
 
-            # Update display every 5 frames
-            if frame_count % 5 == 0:
+            # Update display frequently while still keeping CPU headroom.
+            if frame_count % display_stride == 0:
                 rgb, depth = receiver.get_latest_frames()
 
                 if rgb is not None:
@@ -326,9 +323,11 @@ def main():
                     depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
                     cv2.imshow('Depth Stream', depth_colored)
 
-                # Print stats
-                if frame_count % 30 == 0:
+                # Print stats roughly once per second.
+                now = datetime.now()
+                if (now - last_stats_print).total_seconds() >= 1.0:
                     print(receiver.get_stats())
+                    last_stats_print = now
 
             # Check for quit
             if cv2.waitKey(1) & 0xFF == ord('q'):

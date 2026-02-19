@@ -42,8 +42,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var rgbStreamFrameNumber: UInt32 = 0
     private var depthStreamFrameNumber: UInt32 = 0
     private var lastStreamFrameTime = Date.distantPast
-    private let streamFrameInterval: TimeInterval = 1.0 / 15.0
-    private let streamJPEGQuality: CGFloat = 0.6
+    private let streamFrameInterval: TimeInterval = 1.0 / 12.0
+    private let streamJPEGQuality: CGFloat = 0.45
+    private let streamDepthFrameStride: UInt32 = 2
     private let streamHostDefaultsKey = "streamServerHost"
     private let streamPortDefaultsKey = "streamServerPort"
     private let defaultStreamHost = "172.20.10.2"  // Typical host IP over iPhone USB tethering
@@ -215,11 +216,17 @@ class ARViewController: UIViewController, ARSessionDelegate {
             configuration.frameSemantics.insert(.sceneDepth)
         }
 
-        // Find and use the video format with 30 FPS
+        // Use the smallest 30 FPS format to lower encode/network load and latency.
         let availableFormats = ARWorldTrackingConfiguration.supportedVideoFormats
-        if let format30fps = availableFormats.first(where: { $0.framesPerSecond == 30 }) {
-            configuration.videoFormat = format30fps
-            print("✓ Using 30 FPS video format")
+        let formats30fps = availableFormats.filter { $0.framesPerSecond == 30 }
+        if let lowLatencyFormat = formats30fps.min(by: {
+            ($0.imageResolution.width * $0.imageResolution.height)
+                < ($1.imageResolution.width * $1.imageResolution.height)
+        }) {
+            configuration.videoFormat = lowLatencyFormat
+            let width = Int(lowLatencyFormat.imageResolution.width)
+            let height = Int(lowLatencyFormat.imageResolution.height)
+            print("✓ Using 30 FPS low-latency format: \(width)x\(height)")
         }
 
         arSession.run(configuration)
@@ -456,14 +463,17 @@ class ARViewController: UIViewController, ARSessionDelegate {
             "depthWidth": depthWidth,
             "depthHeight": depthHeight,
             "fps": Int(1.0 / streamFrameInterval),
+            "depthStride": Int(streamDepthFrameStride),
             "rgbBitrate": 0,
-            "rgbEncoding": "jpeg"
+            "rgbEncoding": "jpeg",
+            "depthEncoding": "jpeg"
         ]
     }
 
     func sendStreamFrames(rgbImage: UIImage?, depthPixelBuffer: CVPixelBuffer?, timestampSeconds: TimeInterval) {
         guard isStreaming, streamConnected else { return }
 
+        var didSendRGB = false
         if let rgbData = rgbImage?.jpegData(compressionQuality: streamJPEGQuality) {
             rgbStreamFrameNumber &+= 1
             tcpStreamer.sendFrame(
@@ -473,10 +483,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 payload: rgbData,
                 isKeyFrame: true
             )
+            didSendRGB = true
         }
 
-        if let depthBuffer = depthPixelBuffer,
-           let depthData = DepthCompressor.compress(depthBuffer, format: .png) {
+        let shouldSendDepth = didSendRGB && (rgbStreamFrameNumber % streamDepthFrameStride == 0)
+        if shouldSendDepth,
+           let depthBuffer = depthPixelBuffer,
+           let depthData = DepthCompressor.compress(depthBuffer, format: .jpeg) {
             depthStreamFrameNumber &+= 1
             tcpStreamer.sendFrame(
                 type: .depth,
@@ -612,6 +625,8 @@ private final class TCPFrameStreamer {
     private let queue = DispatchQueue(label: "TCPFrameStreamerQueue")
     private var pendingMetadata: [String: Any]?
     private(set) var isConnected = false
+    private var inFlightSendCount = 0
+    private let maxInFlightSendCount = 2
 
     var onStatusChanged: ((String, Bool) -> Void)?
 
@@ -625,7 +640,10 @@ private final class TCPFrameStreamer {
                 return
             }
 
-            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+            let tcpOptions = NWProtocolTCP.Options()
+            tcpOptions.noDelay = true
+            let parameters = NWParameters(tls: nil, tcp: tcpOptions)
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
             self.connection = connection
 
             connection.stateUpdateHandler = { [weak self] state in
@@ -646,7 +664,14 @@ private final class TCPFrameStreamer {
     func sendFrame(type: StreamFrameType, timestamp: TimeInterval, frameNumber: UInt32, payload: Data, isKeyFrame: Bool) {
         queue.async {
             guard self.isConnected else { return }
-            self.sendPacket(type: type, timestamp: timestamp, frameNumber: frameNumber, payload: payload, isKeyFrame: isKeyFrame)
+            self.sendPacket(
+                type: type,
+                timestamp: timestamp,
+                frameNumber: frameNumber,
+                payload: payload,
+                isKeyFrame: isKeyFrame,
+                enforceInflightLimit: true
+            )
         }
     }
 
@@ -654,6 +679,7 @@ private final class TCPFrameStreamer {
         switch state {
         case .ready:
             isConnected = true
+            inFlightSendCount = 0
             emitStatus("Network: Connected ✓", true)
             sendPendingMetadata()
 
@@ -682,14 +708,25 @@ private final class TCPFrameStreamer {
             timestamp: Date().timeIntervalSince1970,
             frameNumber: 0,
             payload: metadataData,
-            isKeyFrame: false
+            isKeyFrame: false,
+            enforceInflightLimit: false
         )
 
         pendingMetadata = nil
     }
 
-    private func sendPacket(type: StreamFrameType, timestamp: TimeInterval, frameNumber: UInt32, payload: Data, isKeyFrame: Bool) {
+    private func sendPacket(
+        type: StreamFrameType,
+        timestamp: TimeInterval,
+        frameNumber: UInt32,
+        payload: Data,
+        isKeyFrame: Bool,
+        enforceInflightLimit: Bool
+    ) {
         guard let connection = connection else { return }
+        if enforceInflightLimit && inFlightSendCount >= maxInFlightSendCount {
+            return
+        }
 
         var packet = Data(capacity: 18 + payload.count)
 
@@ -706,11 +743,15 @@ private final class TCPFrameStreamer {
         withUnsafeBytes(of: &keyFlag) { packet.append(contentsOf: $0) }
         packet.append(payload)
 
+        inFlightSendCount += 1
         connection.send(content: packet, completion: .contentProcessed { [weak self] error in
             guard let self = self else { return }
-            if let error = error {
-                self.isConnected = false
-                self.emitStatus("Network send error: \(error.localizedDescription)", false)
+            self.queue.async {
+                self.inFlightSendCount = max(0, self.inFlightSendCount - 1)
+                if let error = error {
+                    self.isConnected = false
+                    self.emitStatus("Network send error: \(error.localizedDescription)", false)
+                }
             }
         })
     }
@@ -721,6 +762,7 @@ private final class TCPFrameStreamer {
         connection = nil
         pendingMetadata = nil
         isConnected = false
+        inFlightSendCount = 0
 
         if shouldEmitStatus {
             emitStatus("Network: Off", false)
