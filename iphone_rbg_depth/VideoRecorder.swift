@@ -87,38 +87,40 @@ class VideoRecorder {
             rgbWriter!.add(rgbInput!)
         }
 
-        // Setup depth writer (8-bit grayscale - compatible format)
-        depthWriter = try AVAssetWriter(outputURL: depthURL, fileType: .mov)
+        // Setup depth writer only if depth dimensions are provided
+        if depthWidth > 0 && depthHeight > 0 {
+            depthWriter = try AVAssetWriter(outputURL: depthURL, fileType: .mov)
 
-        let depthSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: depthWidth,
-            AVVideoHeightKey: depthHeight,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 1_000_000,
-                AVVideoExpectedSourceFrameRateKey: fps
+            let depthSettings: [String: Any] = [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: depthWidth,
+                AVVideoHeightKey: depthHeight,
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey: 1_000_000,
+                    AVVideoExpectedSourceFrameRateKey: fps
+                ]
             ]
-        ]
 
-        depthInput = AVAssetWriterInput(mediaType: .video, outputSettings: depthSettings)
-        depthInput?.expectsMediaDataInRealTime = true
-        // Apply 90-degree rotation for portrait orientation
-        depthInput?.transform = CGAffineTransform(rotationAngle: .pi / 2)
+            depthInput = AVAssetWriterInput(mediaType: .video, outputSettings: depthSettings)
+            depthInput?.expectsMediaDataInRealTime = true
+            // Apply 90-degree rotation for portrait orientation
+            depthInput?.transform = CGAffineTransform(rotationAngle: .pi / 2)
 
-        depthAdaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: depthInput!,
-            sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ]
-        )
+            depthAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: depthInput!,
+                sourcePixelBufferAttributes: [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+                ]
+            )
 
-        if depthWriter!.canAdd(depthInput!) {
-            depthWriter!.add(depthInput!)
+            if depthWriter!.canAdd(depthInput!) {
+                depthWriter!.add(depthInput!)
+            }
         }
 
         // Start writing
         rgbWriter!.startWriting()
-        depthWriter!.startWriting()
+        depthWriter?.startWriting()
 
         isRecording = true
         startTime = nil
@@ -126,7 +128,11 @@ class VideoRecorder {
 
         print("✅ Recording started")
         print("   RGB: \(rgbURL.lastPathComponent)")
-        print("   Depth: \(depthURL.lastPathComponent)")
+        if depthWriter != nil {
+            print("   Depth: \(depthURL.lastPathComponent)")
+        } else {
+            print("   Depth: Disabled (RGB only)")
+        }
     }
 
     func stopRecording(completion: @escaping (URL?, URL?, Error?) -> Void) {
@@ -144,12 +150,12 @@ class VideoRecorder {
         depthInput?.markAsFinished()
 
         // Keep strong references
-        guard let rgbWriterCopy = rgbWriter,
-              let depthWriterCopy = depthWriter else {
+        guard let rgbWriterCopy = rgbWriter else {
             completion(nil, nil, NSError(domain: "VideoRecorder", code: -1, userInfo: [NSLocalizedDescriptionKey: "Writers not initialized"]))
             return
         }
 
+        let depthWriterCopy = depthWriter
         let rgbURLCopy = rgbURL
         let depthURLCopy = depthURL
 
@@ -162,20 +168,33 @@ class VideoRecorder {
                     print("  RGB error: \(error.localizedDescription)")
                 }
 
-                // Finish writing depth
-                depthWriterCopy.finishWriting {
-                    print("  Depth writer finished with status: \(depthWriterCopy.status.rawValue)")
-                    if let error = depthWriterCopy.error {
-                        print("  Depth error: \(error.localizedDescription)")
-                    }
+                // Finish writing depth if it exists
+                if let depthWriterCopy = depthWriterCopy {
+                    depthWriterCopy.finishWriting {
+                        print("  Depth writer finished with status: \(depthWriterCopy.status.rawValue)")
+                        if let error = depthWriterCopy.error {
+                            print("  Depth error: \(error.localizedDescription)")
+                        }
 
-                    if rgbWriterCopy.status == .completed && depthWriterCopy.status == .completed {
-                        print("✅ Recording saved successfully")
+                        if rgbWriterCopy.status == .completed && depthWriterCopy.status == .completed {
+                            print("✅ Recording saved successfully")
+                            print("   RGB: \(rgbURLCopy.path)")
+                            print("   Depth: \(depthURLCopy.path)")
+                            completion(rgbURLCopy, depthURLCopy, nil)
+                        } else {
+                            let error = rgbWriterCopy.error ?? depthWriterCopy.error
+                            print("❌ Recording failed: \(error?.localizedDescription ?? "unknown error")")
+                            completion(nil, nil, error)
+                        }
+                    }
+                } else {
+                    // RGB only mode
+                    if rgbWriterCopy.status == .completed {
+                        print("✅ Recording saved successfully (RGB only)")
                         print("   RGB: \(rgbURLCopy.path)")
-                        print("   Depth: \(depthURLCopy.path)")
-                        completion(rgbURLCopy, depthURLCopy, nil)
+                        completion(rgbURLCopy, nil, nil)
                     } else {
-                        let error = rgbWriterCopy.error ?? depthWriterCopy.error
+                        let error = rgbWriterCopy.error
                         print("❌ Recording failed: \(error?.localizedDescription ?? "unknown error")")
                         completion(nil, nil, error)
                     }
@@ -312,7 +331,7 @@ class VideoRecorder {
 
     // MARK: - Save to Photos
 
-    static func saveToPhotos(rgbURL: URL, depthURL: URL, completion: @escaping (Bool, Error?) -> Void) {
+    static func saveToPhotos(rgbURL: URL, depthURL: URL?, completion: @escaping (Bool, Error?) -> Void) {
         PHPhotoLibrary.requestAuthorization { status in
             guard status == .authorized else {
                 completion(false, NSError(domain: "VideoRecorder", code: -1, userInfo: [NSLocalizedDescriptionKey: "Photos access denied"]))
@@ -323,16 +342,20 @@ class VideoRecorder {
                 // Save RGB video
                 PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: rgbURL)
 
-                // Save depth video
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: depthURL)
+                // Save depth video if provided
+                if let depthURL = depthURL {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: depthURL)
+                }
 
             }) { success, error in
                 if success {
-                    print("✅ Videos saved to Photos library")
+                    print("✅ Video(s) saved to Photos library")
 
                     // Clean up temporary files
                     try? FileManager.default.removeItem(at: rgbURL)
-                    try? FileManager.default.removeItem(at: depthURL)
+                    if let depthURL = depthURL {
+                        try? FileManager.default.removeItem(at: depthURL)
+                    }
                 } else {
                     print("❌ Failed to save to Photos: \(error?.localizedDescription ?? "unknown error")")
                 }

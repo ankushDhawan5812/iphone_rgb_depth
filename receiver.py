@@ -281,18 +281,15 @@ def main():
 
         # Create display windows
         cv2.namedWindow('RGB Stream', cv2.WINDOW_NORMAL)
-        cv2.namedWindow('Depth Stream', cv2.WINDOW_NORMAL)
 
         # Resize windows to be more visible
         cv2.resizeWindow('RGB Stream', 960, 720)
-        cv2.resizeWindow('Depth Stream', 640, 480)
 
         # Move windows to specific positions
         cv2.moveWindow('RGB Stream', 50, 50)
-        cv2.moveWindow('Depth Stream', 1050, 50)
 
-        print("📺 Display windows opened (should appear on screen)")
-        print("   If you don't see them, check Mission Control or other desktops")
+        print("📺 RGB display window opened (should appear on screen)")
+        print("   If you don't see it, check Mission Control or other desktops")
         print("Press 'q' to quit\n")
 
         frame_count = 0
@@ -316,12 +313,6 @@ def main():
 
                 if rgb is not None:
                     cv2.imshow('RGB Stream', rgb)
-
-                if depth is not None:
-                    # Normalize depth for display
-                    depth_normalized = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                    depth_colored = cv2.applyColorMap(depth_normalized, cv2.COLORMAP_JET)
-                    cv2.imshow('Depth Stream', depth_colored)
 
                 # Print stats roughly once per second.
                 now = datetime.now()

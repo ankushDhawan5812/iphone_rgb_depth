@@ -16,9 +16,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
     // MARK: - Properties
     var arSession: ARSession!
     var rgbImageView: UIImageView!
-    var depthImageView: UIImageView!
     var statusLabel: UILabel!
-    var lidarStatusLabel: UILabel!
     var fpsLabel: UILabel!
     var recordButton: UIButton!
     var recordingStatusLabel: UILabel!
@@ -40,11 +38,9 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var isStreaming = false
     private var streamConnected = false
     private var rgbStreamFrameNumber: UInt32 = 0
-    private var depthStreamFrameNumber: UInt32 = 0
     private var lastStreamFrameTime = Date.distantPast
     private let streamFrameInterval: TimeInterval = 1.0 / 12.0
     private let streamJPEGQuality: CGFloat = 0.45
-    private let streamDepthFrameStride: UInt32 = 2
     private let streamHostDefaultsKey = "streamServerHost"
     private let streamPortDefaultsKey = "streamServerPort"
     private let defaultStreamHost = "172.20.10.2"  // Typical host IP over iPhone USB tethering
@@ -55,7 +51,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         super.viewDidLoad()
         setupUI()
         setupAR()
-        checkLiDARAvailability()
         setupStreamer()
     }
 
@@ -82,23 +77,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
     func setupUI() {
         view.backgroundColor = .black
 
-        // Create side-by-side image views
-        let stackView = UIStackView()
-        stackView.axis = .horizontal
-        stackView.distribution = .fillEqually
-        stackView.spacing = 2
-        stackView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stackView)
-
+        // Create RGB image view (full width)
         rgbImageView = UIImageView()
         rgbImageView.contentMode = .scaleAspectFit
         rgbImageView.backgroundColor = .darkGray
-        stackView.addArrangedSubview(rgbImageView)
-
-        depthImageView = UIImageView()
-        depthImageView.contentMode = .scaleAspectFit
-        depthImageView.backgroundColor = .darkGray
-        stackView.addArrangedSubview(depthImageView)
+        rgbImageView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(rgbImageView)
 
         // Status label
         statusLabel = UILabel()
@@ -109,14 +93,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         statusLabel.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
-
-        // LiDAR status
-        lidarStatusLabel = UILabel()
-        lidarStatusLabel.textColor = .green
-        lidarStatusLabel.textAlignment = .left
-        lidarStatusLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
-        lidarStatusLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(lidarStatusLabel)
 
         // FPS label
         fpsLabel = UILabel()
@@ -169,19 +145,16 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         // Layout constraints
         NSLayoutConstraint.activate([
-            stackView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 100),
-            stackView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stackView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.5),
+            rgbImageView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 100),
+            rgbImageView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            rgbImageView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            rgbImageView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.6),
 
             statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: streamButton.leadingAnchor, constant: -8),
 
-            lidarStatusLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 5),
-            lidarStatusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-
-            fpsLabel.topAnchor.constraint(equalTo: lidarStatusLabel.bottomAnchor, constant: 5),
+            fpsLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 5),
             fpsLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
 
             streamButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
@@ -211,11 +184,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
         let configuration = ARWorldTrackingConfiguration()
 
-        // Enable scene depth if available
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            configuration.frameSemantics.insert(.sceneDepth)
-        }
-
         // Use the smallest 30 FPS format to lower encode/network load and latency.
         let availableFormats = ARWorldTrackingConfiguration.supportedVideoFormats
         let formats30fps = availableFormats.filter { $0.framesPerSecond == 30 }
@@ -230,19 +198,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
         }
 
         arSession.run(configuration)
-        print("✓ AR Session started")
-    }
-
-    func checkLiDARAvailability() {
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            lidarStatusLabel.text = "✓ LiDAR Supported"
-            lidarStatusLabel.textColor = .green
-            print("✓ LiDAR is supported on this device")
-        } else {
-            lidarStatusLabel.text = "✗ LiDAR Not Available"
-            lidarStatusLabel.textColor = .red
-            print("✗ LiDAR is not supported on this device")
-        }
+        print("✓ AR Session started (RGB only, no LiDAR)")
     }
 
     // MARK: - Recording Control
@@ -261,16 +217,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
         // Get dimensions from AR session
         let rgbWidth = 1920
         let rgbHeight = 1440
-        let depthWidth = 256
-        let depthHeight = 192
         let fps = 30
 
         do {
             try videoRecorder?.startRecording(
                 rgbWidth: rgbWidth,
                 rgbHeight: rgbHeight,
-                depthWidth: depthWidth,
-                depthHeight: depthHeight,
+                depthWidth: 0,
+                depthHeight: 0,
                 fps: fps
             )
 
@@ -282,7 +236,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
             recordingStatusLabel.text = "Recording..."
             recordingStatusLabel.textColor = .red
 
-            print("🎬 Recording started")
+            print("🎬 Recording started (RGB only)")
 
         } catch {
             print("❌ Failed to start recording: \(error.localizedDescription)")
@@ -315,7 +269,7 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 return
             }
 
-            guard let rgbURL = rgbURL, let depthURL = depthURL else {
+            guard let rgbURL = rgbURL else {
                 DispatchQueue.main.async {
                     self.recordingStatusLabel.text = "Recording failed"
                     self.recordingStatusLabel.textColor = .red
@@ -324,8 +278,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 return
             }
 
-            // Save to Photos
-            VideoRecorder.saveToPhotos(rgbURL: rgbURL, depthURL: depthURL) { success, error in
+            // Save to Photos (RGB only)
+            VideoRecorder.saveToPhotos(rgbURL: rgbURL, depthURL: nil) { success, error in
                 DispatchQueue.main.async {
                     if success {
                         self.recordingStatusLabel.text = "✅ Saved to Photos!"
@@ -417,7 +371,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
         isStreaming = true
         streamConnected = false
         rgbStreamFrameNumber = 0
-        depthStreamFrameNumber = 0
         lastStreamFrameTime = Date.distantPast
 
         streamButton.setTitle("🛑 STOP STREAMING", for: .normal)
@@ -442,38 +395,26 @@ class ARViewController: UIViewController, ARSessionDelegate {
     func buildSessionMetadata() -> [String: Any] {
         var rgbWidth = 1920
         var rgbHeight = 1440
-        var depthWidth = 256
-        var depthHeight = 192
 
         if let currentFrame = arSession.currentFrame {
             let rgbBuffer = currentFrame.capturedImage
             rgbWidth = CVPixelBufferGetWidth(rgbBuffer)
             rgbHeight = CVPixelBufferGetHeight(rgbBuffer)
-
-            if let depthBuffer = currentFrame.sceneDepth?.depthMap {
-                depthWidth = CVPixelBufferGetWidth(depthBuffer)
-                depthHeight = CVPixelBufferGetHeight(depthBuffer)
-            }
         }
 
         return [
             "sessionId": UUID().uuidString,
             "rgbWidth": rgbWidth,
             "rgbHeight": rgbHeight,
-            "depthWidth": depthWidth,
-            "depthHeight": depthHeight,
             "fps": Int(1.0 / streamFrameInterval),
-            "depthStride": Int(streamDepthFrameStride),
             "rgbBitrate": 0,
-            "rgbEncoding": "jpeg",
-            "depthEncoding": "jpeg"
+            "rgbEncoding": "jpeg"
         ]
     }
 
-    func sendStreamFrames(rgbImage: UIImage?, depthPixelBuffer: CVPixelBuffer?, timestampSeconds: TimeInterval) {
+    func sendStreamFrames(rgbImage: UIImage?, timestampSeconds: TimeInterval) {
         guard isStreaming, streamConnected else { return }
 
-        var didSendRGB = false
         if let rgbData = rgbImage?.jpegData(compressionQuality: streamJPEGQuality) {
             rgbStreamFrameNumber &+= 1
             tcpStreamer.sendFrame(
@@ -482,21 +423,6 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 frameNumber: rgbStreamFrameNumber,
                 payload: rgbData,
                 isKeyFrame: true
-            )
-            didSendRGB = true
-        }
-
-        let shouldSendDepth = didSendRGB && (rgbStreamFrameNumber % streamDepthFrameStride == 0)
-        if shouldSendDepth,
-           let depthBuffer = depthPixelBuffer,
-           let depthData = DepthCompressor.compress(depthBuffer, format: .jpeg) {
-            depthStreamFrameNumber &+= 1
-            tcpStreamer.sendFrame(
-                type: .depth,
-                timestamp: timestampSeconds,
-                frameNumber: depthStreamFrameNumber,
-                payload: depthData,
-                isKeyFrame: false
             )
         }
     }
@@ -514,18 +440,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
         isProcessingFrame = true
         lastFrameTime = now
 
-        // Get buffers
+        // Get RGB buffer only
         let rgbPixelBuffer = frame.capturedImage
-        let depthPixelBuffer = frame.sceneDepth?.depthMap
         let timestamp = CMTime(seconds: frame.timestamp, preferredTimescale: 600)
 
         // Write frames if recording
         if isRecording {
             videoRecorder?.writeRGBFrame(rgbPixelBuffer, timestamp: timestamp)
-
-            if let depthBuffer = depthPixelBuffer {
-                videoRecorder?.writeDepthFrame(depthBuffer, timestamp: timestamp)
-            }
 
             // Update recording status
             if let frameCount = videoRecorder?.getFrameCount() {
@@ -547,18 +468,12 @@ class ARViewController: UIViewController, ARSessionDelegate {
                 return
             }
 
-            // Convert images for display
+            // Convert RGB image for display
             let rgbImage = DepthImageConverter.convertRGBToImage(rgbPixelBuffer)
-            var depthImage: UIImage?
-
-            if let depthBuffer = depthPixelBuffer {
-                depthImage = DepthImageConverter.convertDepthToImage(depthBuffer)
-            }
 
             if shouldSendStreamFrame {
                 self.sendStreamFrames(
                     rgbImage: rgbImage,
-                    depthPixelBuffer: depthPixelBuffer,
                     timestampSeconds: frame.timestamp
                 )
             }
@@ -567,19 +482,13 @@ class ARViewController: UIViewController, ARSessionDelegate {
             DispatchQueue.main.async {
                 autoreleasepool {
                     self.rgbImageView.image = rgbImage
-                    self.depthImageView.image = depthImage
 
                     // Log on first successful frame only
                     if self.frameCount == 1 {
                         if let rgbWidth = rgbImage?.size.width, let rgbHeight = rgbImage?.size.height {
                             print("\n=== Frame Data ===")
                             print("RGB: \(Int(rgbWidth))x\(Int(rgbHeight))")
-
-                            if let depthImage = depthImage {
-                                print("Depth: \(Int(depthImage.size.width))x\(Int(depthImage.size.height))")
-                            }
-
-                            print("Processing at ~30 FPS")
+                            print("Processing at ~30 FPS (RGB only, no LiDAR)")
                             print("==================\n")
                         }
                     }
